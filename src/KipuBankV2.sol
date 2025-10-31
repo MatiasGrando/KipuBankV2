@@ -10,7 +10,6 @@ pragma solidity >0.8.28;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IOracle} from "./IOracle.sol";
 
 contract  KipuBank is Ownable {
 
@@ -18,24 +17,23 @@ contract  KipuBank is Ownable {
     Variables
     ///////////////////////*/
 
-    ///@notice immutable variable for the max withdraft per transaction permitted
+    ///@notice immutable variable for the max withdraft in USDC per transaction permitted
     uint256 immutable public MAX_WITHDRAFT_PER_TRANSACTION;
-    ///@notice immutable variable for the balance cap of bank permitted
+    ///@notice immutable variable for the balance cap in USDC of bank permitted
     uint256 immutable public MAX_CAP_BANK;
     ///@notice immutable variable for the address of the USDC token
     IERC20 immutable USDC;
-    ///@notice immutable variable for the decimal of the ETH/USD
-    uint256 constant DECIMAL_ETHUSD = 1 * 10 ** 26;
+    ///@notice immutable variable for the decimal of the ETH/USD. wei-18Decimals + oracle 8decimals
+    uint256 constant DECIMAL_ETHUSD = 1 * 10 ** 20;
     ///@notice variable to record the deposit count
     uint256 public totalDeposits;
     ///@notice variable to record the withdraft count
     uint256 public totalWithdraft;
     ///@notice variable to store the Chainlink Feed address
     AggregatorV3Interface internal priceFeed;
-    IOracle internal  oracle;
 
-    ///@notice map to store user balances
-    mapping (address => uint256) private userBalance;
+
+
     /*///////////////////////
     Mapping
     ///////////////////////*/
@@ -50,15 +48,19 @@ contract  KipuBank is Ownable {
      */
     mapping(address user => mapping(address token => uint256 balance)) public userTokenBalance;
 
+    /// @notice Stores the Chainlink price feed for each token.
+    /// @dev Maps a token address (ERC20 or address(0) for ETH) to its AggregatorV3Interface price feed contract.
+    ///      The price feed returns the token price in USD with its feed decimals.
+    mapping(address => AggregatorV3Interface) public priceFeeds;
     /*///////////////////////
     Events
     ////////////////////////*/
 
      /**
-     * @notice Emitted when a new oracle address is set in the contract.
-     * @param IOracle The address of the newly registered oracle.
+     * @notice Emitted when a new price feed address is set in the contract.
+     * @param token is The address of the new token with newPriceFeed that is your newly registered oracle.
      */
-    event NewOracle(address indexed IOracle);
+    event NewPriceFeed(address token, address newPriceFeed);
 
     /**
      * @notice Emitted when a user withdraws ETH or tokens from the contract.
@@ -136,17 +138,20 @@ contract  KipuBank is Ownable {
         MAX_WITHDRAFT_PER_TRANSACTION = _maxWithdraftPerTransaction;
         MAX_CAP_BANK = _maxCapBank;
         USDC=IERC20(_USDC);
+        priceFeeds[_USDC] = AggregatorV3Interface(0x14866185B1962B63C3Ea9E03Bc1da838bab34C19);
+        priceFeeds[address(0)] = AggregatorV3Interface(0x694AA1769357215DE4FAC081bf1f309aDC325306);
     }
-
+    
+    
      /**
      * @dev Ensures that the new deposit does not exceed the maximum allowed bank cap.
      * Reverts with {MaxCapBank} if the total balance after the deposit would exceed `MAX_CAP_BANK`.
-     * @param amount The amount of ETH or tokens being deposited.
+     * @param _amount The amount of ETH or tokens being deposited.
      */
-    modifier maxCapBank(uint256 amount) {
-        if ((getContractBalance + convertETHinUSD(_tokenAmount);) > MAX_CAP_BANK) {
+    modifier maxCapBank(uint256 _amount, address _token,uint8 _tokenDecimals) {
+        if ((getContractBalance() + tokenAmountInUSD(_token, _amount, _tokenDecimals)) > MAX_CAP_BANK) {
             revert MaxCapBank(
-                msg.value, 
+                _amount, 
                 address(this).balance, 
                 MAX_CAP_BANK, 
                 msg.sender
@@ -160,8 +165,10 @@ contract  KipuBank is Ownable {
      * Reverts with {MaxWithdrawPerTransaction} if `amount` is greater than `MAX_WITHDRAFT_PER_TRANSACTION`.
      * @param amount The requested withdrawal amount.
      */
-    modifier maxWithdraw(uint256 amount) {
-        if (amount > MAX_WITHDRAFT_PER_TRANSACTION) {
+    modifier maxWithdraw(uint256 amount, address tokenAddress, uint8 tokenDecimals) {
+        //uint8 tokenDecimals = 8;
+       // if(tokenAddress == address(0)){tokenDecimals = 20;}
+        if (tokenAmountInUSD (tokenAddress, amount, tokenDecimals)> MAX_WITHDRAFT_PER_TRANSACTION) {
             revert MaxWithdrawPerTransaction(
                 amount, 
                 MAX_WITHDRAFT_PER_TRANSACTION, 
@@ -176,8 +183,8 @@ contract  KipuBank is Ownable {
      * Reverts with {WithoutSufficientBalance} if `amount` exceeds the user's available balance.
      * @param amount The requested withdrawal amount.
      */
-    modifier withoutSufficientBalance(uint256 amount) {
-        uint256 balance = userBalance[msg.sender];
+    modifier withoutSufficientBalance(uint256 amount,address _tokenAddress) {
+        uint256 balance = userTokenBalance[msg.sender][_tokenAddress];
         if (amount > balance) {
             revert WithoutSufficientBalance(amount, balance);
         }
@@ -192,7 +199,7 @@ contract  KipuBank is Ownable {
      * - Calls the internal `_registerOfDeposit()` function for accounting or tracking.
      * - Emits a {Deposit} event upon success.
      */
-    fallback() external payable maxCapBank(msg.value) { 
+    fallback() external payable maxCapBank(msg.value, address(0),20) { 
         unchecked {
             userTokenBalance[msg.sender][address(0)] += msg.value;
         }
@@ -208,7 +215,7 @@ contract  KipuBank is Ownable {
      * - Updates the user's ETH balance and registers the deposit.
      * - Emits a {Deposit} event.
      */
-    receive() external payable maxCapBank(msg.value) {
+    receive() external payable maxCapBank(msg.value, address(0),20) {
         unchecked {
             userTokenBalance[msg.sender][address(0)] += msg.value;
         }
@@ -224,7 +231,7 @@ contract  KipuBank is Ownable {
      * - Updates the user's balance and registers the deposit.
      * - Emits a {Deposit} event.
      */
-    function deposit() external payable maxCapBank(msg.value) {
+    function deposit() external payable maxCapBank(msg.value, address(0),20) {
         unchecked {
             userTokenBalance[msg.sender][address(0)] += msg.value;
         }
@@ -238,7 +245,8 @@ contract  KipuBank is Ownable {
      * @param _tokenAmount The number of tokens to deposit.
      * @param _tokenAddress The ERC20 token contract address.
      */
-    function depositToken(uint256 _tokenAmount, address _tokenAddress) external {
+    function depositToken(uint256 _tokenAmount, address _tokenAddress, uint8 decimals) external 
+    maxCapBank( _tokenAmount,_tokenAddress, decimals){
         userTokenBalance[msg.sender][_tokenAddress] += _tokenAmount;
         IERC20(_tokenAddress).transferFrom(msg.sender, address(this), _tokenAmount);
         emit DepositToken(msg.sender, _tokenAddress, _tokenAmount);
@@ -250,7 +258,8 @@ contract  KipuBank is Ownable {
      * @param _tokenAddress The ERC20 token address or address(0) for ETH.
      * @return data Additional return data (e.g. call result for ETH transfer).
      */
-    function withdrafToken(uint256 _tokenAmount, address _tokenAddress) external
+    function withdrafToken(uint256 _tokenAmount, address _tokenAddress, uint8 tokenDecimals)  external 
+    withoutSufficientBalance(_tokenAmount, _tokenAddress) maxWithdraw(_tokenAmount, _tokenAddress, tokenDecimals)
              returns(bytes memory data ) {
         if(_tokenAddress == address(0)){
             unchecked{
@@ -275,16 +284,23 @@ contract  KipuBank is Ownable {
         }
     }
     /**
-    * @notice Updates the oracle feed used by the contract to fetch price data.
-    * @dev Only the contract owner can call this function.
-    * Reverts if `_oracle` is the zero address.
-    * Assigns the new oracle to the `oracle` state variable.
-    * @param _oracle The address of the new oracle contract.
-    */
-    function setFeed(address _oracle) external onlyOwner {
-        require(_oracle != address(0), "Oracle address cannot be zero");
-        oracle = IOracle(_oracle);
-        emit NewOracle(address(oracle)); //0x694AA1769357215DE4FAC081bf1f309aDC325306 eth/usd
+     * @notice Sets a new Chainlink price feed for a specific token.
+     * @dev Only the contract owner can call this function.
+     *      Each token is associated with an AggregatorV3Interface contract returning its USD price.
+     *      If a feed already exists for the token, it will be overwritten.
+     *      Emits a {NewPriceFeed} event with the token address and the new feed address.
+     * @param token The address of the ERC20 token (use address(0) for ETH).
+     * @param feed The address of the Chainlink AggregatorV3Interface contract for the token.
+     * 
+     * Requirements:
+     * - Only the `owner` can call this function.
+     * - `feed` must be a valid address (not address(0)).
+     * 
+     * Emits a {NewPriceFeed} event.
+     */
+    function setPriceFeed(address token, address feed) external onlyOwner {
+       priceFeeds[token] = AggregatorV3Interface(feed);
+       emit NewPriceFeed(token, address(priceFeeds[token]));
     }
     
      /**
@@ -335,7 +351,51 @@ contract  KipuBank is Ownable {
         return userTokenBalance[msg.sender][addr];
 
     }
+   
+     /**
+     * @notice Retrieves the latest USD price of a given token from its Chainlink price feed.
+     * @dev Reads the latest round data from the AggregatorV3Interface associated with the token.
+     *      Reverts if the price is zero or negative.
+     * @param token The address of the ERC20 token (or address(0) for ETH).
+     * @return price The latest price of the token in USD, scaled according to the feed's decimals.
+     */
+    function getTokenPriceUSD(address token) internal view returns (uint256) {
+        (, int256 price,,,) = priceFeeds[token].latestRoundData();
+        require(price > 0, "invalid price");
+        return uint256(price);
+    }
+
     /**
+     * @notice Converts a given token amount to its USD value using the Chainlink price feed.
+     * @dev Calculates: `usdValue = amount * price / (10 ** tokenDecimals)`.
+     *      Price is obtained from the feed associated with the token.
+     *      Ensure that MAX_WITHDRAFT_PER_TRANSACTION uses the same decimal scale as the usdValue.
+     * @param token The address of the ERC20 token (or address(0) for ETH).
+     * @param amount The amount of tokens to convert.
+     * @param tokenDecimals The number of decimals of the token (usually 18 for ETH, 6 for USDC/USDT).
+     * @return usdValue The value of the token amount in USD, scaled according to the feed's decimals.
+     */
+    function tokenAmountInUSD(address token, uint256 amount, uint8 tokenDecimals) internal view returns (uint256) {
+         uint256 price = getTokenPriceUSD(token); 
+         uint256 usdValue = (amount * price) / (10 ** tokenDecimals); 
+         return usdValue;
+    }
+
+   
+    /**
+    * @notice Returns the latest ETH price from the priceFeeds.
+    * @dev 
+    * - Uses the `latestRoundData` function from the `AggregatorV3Interface` interface.
+    * - Only returns the price (`answer`) field; ignores other round data.
+    * - The returned price typically has 8 decimals (depends on price feed).
+    * @return _price The latest ETH price from the AggregatorV3Interface.
+    */
+    function getEthPrice () public view returns (int256 _price){
+          (, int256 price, , , )  = (priceFeeds[address(0)]).latestRoundData();
+        _price = price;
+    }
+
+     /**
     * @notice Returns the total balance of the contract in USD-equivalent.
     * @dev 
     * - Converts the contract's ETH balance to USD using `convertTokeninUSD`.
@@ -343,45 +403,8 @@ contract  KipuBank is Ownable {
     * @return _balance The total balance of the contract in USD-equivalent.
     */
 
-    function getContractBalance () public view returns (uint256 _balance) {
+    function getContractBalance ()  public view returns (uint256 _balance) {
         return (convertETHinUSD(address(this).balance)+USDC.balanceOf(address(this)));
-    }
-
-   
-    /**
-    * @notice Returns the latest ETH price from the oracle.
-    * @dev 
-    * - Uses the `latestRoundData` function from the `IOracle` interface.
-    * - Only returns the price (`answer`) field; ignores other round data.
-    * - The returned price typically has 8 decimals (depends on oracle feed).
-    * @return _price The latest ETH price from the oracle.
-    */
-    function getEthPrice () public view returns (int256 _price){
-        (int256 price) = oracle.latestRoundData();
-        _price = price;
-    }
-
-
-    //1000000000000000000   4117-88170000
-    // 0x0000000000000000000000000000000000000000
-}
-
-----------------------------------------------------------------
-// SPDX-License-Identifier: MIT
-// Compatible with OpenZeppelin Contracts ^5.4.0
-pragma solidity ^0.8.27;
-
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-
-contract Coin is ERC20 {
-    constructor()
-        ERC20("Coin", "USDC")
-    {}
-
-    function mint(address to, uint256 amount) public  {
-        _mint(to, amount);
-    }
-    function decimals() public pure override returns (uint8) {
-        return 6;
+        //en caso de agregar mas monedas se podria almacenar los addr de los tokens en una lista y luego ir convirtiendo y sumando los mismos
     }
 }
