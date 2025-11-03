@@ -445,6 +445,7 @@ contract  KipuBankV2 is Ownable {
 }
 
 /////////////////////////////////
+/*
 Corrección 1:
 
 
@@ -474,3 +475,4 @@ Corrección 1:
 - Arregla las indentaciones que tienes mal.
 
 Revisa y modifica meticulosamente cada uno de estos puntos
+*/
